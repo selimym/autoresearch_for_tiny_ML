@@ -10,30 +10,23 @@ Data and subset index are stored in ~/.cache/autoresearch-tinydet/.
 """
 
 import json
-import os
 import random
 import urllib.request
 from pathlib import Path
 
 from train_utils import CACHE_DIR, SUBSET_INDEX_PATH
 
-try:
-    import pycocotools.coco
-    HAS_COCO_TOOLS = True
-except ImportError:
-    HAS_COCO_TOOLS = False
+import importlib.util
 
-try:
-    import timm
-    HAS_TIMM = True
-except ImportError:
-    HAS_TIMM = False
+HAS_COCO_TOOLS = importlib.util.find_spec("pycocotools") is not None
+HAS_TIMM = importlib.util.find_spec("timm") is not None
 
 
 # ---------------------------------------------------------------------------
 # COCO URLs
 # ---------------------------------------------------------------------------
 
+COCO_TRAIN_URL = "http://images.cocodataset.org/zips/train2017.zip"
 COCO_VAL_URL = "http://images.cocodataset.org/zips/val2017.zip"
 COCO_ANN_URL = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
 
@@ -43,12 +36,33 @@ COCO_ANN_URL = "http://images.cocodataset.org/annotations/annotations_trainval20
 # ---------------------------------------------------------------------------
 
 def download_coco(cache_dir: Path) -> None:
-    """Download COCO 2017 val images and annotations.
+    """Download COCO 2017 train/val images and annotations.
 
     Idempotent: skips download if files already exist.
     """
     zips_dir = cache_dir / "zips"
     zips_dir.mkdir(parents=True, exist_ok=True)
+
+    # Download train2017.zip (~18 GB)
+    train_zip = zips_dir / "train2017.zip"
+    train_extract = cache_dir / "train2017"
+    if not train_extract.exists():
+        if not train_zip.exists():
+            print(f"Downloading {COCO_TRAIN_URL} (~18 GB, this will take a while)...")
+            try:
+                urllib.request.urlretrieve(COCO_TRAIN_URL, str(train_zip))
+                print(f"  Downloaded to {train_zip}")
+            except Exception as e:
+                print(f"  Error downloading train2017: {e}")
+                return
+
+        print(f"Extracting {train_zip}...")
+        import zipfile
+        with zipfile.ZipFile(train_zip, "r") as z:
+            z.extractall(cache_dir)
+        print(f"  Extracted to {train_extract}")
+    else:
+        print(f"Train images already exist at {train_extract}")
 
     # Download val2017.zip
     val_zip = zips_dir / "val2017.zip"
@@ -145,7 +159,7 @@ def build_subset_index(cache_dir: Path, output_path: Path, subset_size: int = 50
         # Compute max bbox area
         max_area = 0.0
         for ann in ann_dicts:
-            x, y, w, h = ann["bbox"]
+            _, _, w, h = ann["bbox"]
             area = w * h
             max_area = max(max_area, area)
 
@@ -233,6 +247,8 @@ def verify_backbone() -> list:
     if not HAS_TIMM:
         raise ImportError("timm not available. Install with: pip install timm")
 
+    import timm  # imported locally to avoid "possibly unbound" after try/except
+
     print("Loading backbone: mobilenetv4_conv_small.e2400_r224_in1k...")
     backbone = timm.create_model(
         "mobilenetv4_conv_small.e2400_r224_in1k",
@@ -241,7 +257,7 @@ def verify_backbone() -> list:
         out_indices=(2, 3, 4),
     )
 
-    feature_channels = backbone.feature_info.channels()
+    feature_channels = backbone.feature_info.channels()  # type: ignore[union-attr]
     print(f"  Feature channels: {feature_channels}")
 
     return feature_channels
@@ -286,6 +302,11 @@ def main():
     print("=== autoresearch-tinydet data ready ===")
     print("=" * 70)
     print(f"CACHE_DIR: {CACHE_DIR}")
+
+    train_dir = CACHE_DIR / "train2017"
+    if train_dir.exists():
+        n_train = len(list(train_dir.glob("*.jpg")))
+        print(f"Train images: {n_train} images in train2017/")
 
     val_dir = CACHE_DIR / "val2017"
     if val_dir.exists():

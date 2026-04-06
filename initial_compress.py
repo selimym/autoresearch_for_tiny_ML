@@ -433,7 +433,7 @@ def fcos_loss(cls_preds, reg_preds, ctr_preds, targets, strides):
 # Experiment runner — called by ShinkaEvolve
 # ---------------------------------------------------------------------------
 
-def run_experiment() -> dict:
+def run_experiment(seed: int = 1) -> dict:
     """Train a TinyDetector for EPOCHS epochs and return evaluation metrics.
 
     Returns:

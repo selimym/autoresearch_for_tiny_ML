@@ -36,14 +36,14 @@ evo_config:
   job_type: local
 
   llm_models:
-    - "claude-sonnet-4-5"
+    - "claude-sonnet-4-6"
     - "gemini-2.0-flash"
   llm_kwargs:
     temperatures: [0.5, 1.0]
     max_tokens: 8192
 
   meta_rec_interval: 5
-  meta_llm_models: ["claude-sonnet-4-5"]
+  meta_llm_models: ["claude-sonnet-4-6"]
   meta_llm_kwargs:
     temperatures: [0]
     max_tokens: 8192
