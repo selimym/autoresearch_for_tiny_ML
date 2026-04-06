@@ -426,14 +426,6 @@ def fcos_loss(cls_preds, reg_preds, ctr_preds, targets, strides):
 
     denom = max(total_pos, 1)
     loss = (total_cls_loss + total_reg_loss + total_ctr_loss) / denom
-
-    # Always attach the loss to the autograd graph via a zero-grad sentinel.
-    # This ensures loss.backward() works even in unit tests that pass plain
-    # leaf tensors without requires_grad=True (e.g. torch.randn(...) without
-    # requires_grad).  In normal training the model parameters already supply
-    # the grad_fn, so this adds negligible overhead.
-    _sentinel = torch.zeros(1, device=device, requires_grad=True)
-    loss = loss + _sentinel.sum() * 0.0
     return loss
 
 
@@ -489,11 +481,7 @@ def run_experiment() -> dict:
     onnx_path = "checkpoints/phase1_candidate.onnx"
     export_onnx(model, onnx_path, IMG_SIZE)
 
-    # CRITICAL: Fill in mAP50 computation in evaluate_core.py
-    # evaluate_model currently returns mAP50=0.0 (stub).
-    # After exporting, the ONNX has these outputs:
-    # - For each of 3 FPN levels: cls_pred (1,1,H,W), reg_pred (1,4,H,W), ctr_pred (1,1,H,W)
-    # = 9 ONNX output tensors total
+    # evaluate_core.py computes mAP50, latency, and model size
     metrics = evaluate_model(onnx_path)
 
     save_checkpoint(
@@ -520,6 +508,46 @@ def run_experiment() -> dict:
 # EVOLVE-BLOCK-END
 
 if __name__ == "__main__":
-    print("Smoke test...")
-    result = run_experiment()
-    print(result)
+    import torch
+    print("=== Smoke test: architecture only (no COCO data required) ===")
+
+    backbone_channels = [64, 96, 960]  # real MNv4-Conv-S channels
+    FPNNeck, FCOSHead, TinyDetector = build_model(backbone_channels)
+    neck = FPNNeck(backbone_channels, NECK_CHANNELS, UIB_CONFIGS)
+    head = FCOSHead(NECK_CHANNELS, HEAD_CHANNELS, HEAD_STACKS)
+
+    class _DummyBackbone(torch.nn.Module):
+        def forward(self, x):
+            B = x.shape[0]
+            return [
+                torch.zeros(B, 64,  40, 40),
+                torch.zeros(B, 96,  20, 20),
+                torch.zeros(B, 960, 10, 10),
+            ]
+
+    model = TinyDetector(_DummyBackbone(), neck, head).eval()
+    with torch.no_grad():
+        cls_p, reg_p, ctr_p = model(torch.zeros(1, 3, IMG_SIZE, IMG_SIZE))
+
+    assert len(cls_p) == 3, "Expected 3 FPN levels"
+    assert cls_p[0].shape[1] == 1, f"cls should have 1 channel, got {cls_p[0].shape[1]}"
+    assert reg_p[0].shape[1] == 4, f"reg should have 4 channels, got {reg_p[0].shape[1]}"
+    print(f"  P3 cls: {cls_p[0].shape}, reg: {reg_p[0].shape}, ctr: {ctr_p[0].shape}")
+    print(f"  P4 cls: {cls_p[1].shape}, reg: {reg_p[1].shape}")
+    print(f"  P5 cls: {cls_p[2].shape}, reg: {reg_p[2].shape}")
+
+    # Test fcos_loss with model-generated tensors (so they have grad_fn)
+    model.train()
+    x = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE)
+    cls_p, reg_p, ctr_p = model(x)
+    dummy_targets = [{
+        "boxes": torch.tensor([[50., 50., 200., 200.]]),
+        "labels": torch.tensor([1]),
+        "image_id": torch.tensor([0]),
+    }]
+    loss = fcos_loss(cls_p, reg_p, ctr_p, dummy_targets, [8, 16, 32])
+    assert loss.requires_grad, "loss must have grad_fn for backward to work"
+    loss.backward()
+    print(f"  fcos_loss = {loss.item():.4f}, backward OK")
+    print("=== Smoke test PASSED ===")
+    print("To run a full experiment (requires COCO data), call run_experiment() directly.")

@@ -91,15 +91,16 @@ def _compute_map50(onnx_path: str) -> float:
         layout = "interleaved"  # fallback
 
     def _decode_level(outputs, level_idx, layout):
-        """Return (cls_out, reg_out) for the given level index."""
+        """Return (cls_out, reg_out, ctr_out) for the given level index."""
         if layout == "interleaved":
             base = level_idx * 3
-            return outputs[base], outputs[base + 1]
+            return outputs[base], outputs[base + 1], outputs[base + 2]
         else:
             # grouped: cls0..cls(n-1), reg0..reg(n-1), ctr0..ctr(n-1)
             cls_out = outputs[level_idx]
             reg_out = outputs[num_levels + level_idx]
-            return cls_out, reg_out
+            ctr_out = outputs[num_levels * 2 + level_idx]
+            return cls_out, reg_out, ctr_out
 
     results = []
     for imgs, targets in val_loader:
@@ -112,10 +113,12 @@ def _compute_map50(onnx_path: str) -> float:
         for level_idx, stride in enumerate(strides):
             if level_idx * 3 >= len(outputs) and level_idx >= len(outputs):
                 break
-            cls_out, reg_out = _decode_level(outputs, level_idx, layout)
+            cls_out, reg_out, ctr_out = _decode_level(outputs, level_idx, layout)
 
             H, W = cls_out.shape[2], cls_out.shape[3]
-            scores = 1 / (1 + np.exp(-cls_out[0, 0]))  # sigmoid, shape (H, W)
+            cls_sigmoid = 1 / (1 + np.exp(-cls_out[0, 0]))  # sigmoid, shape (H, W)
+            ctr_sigmoid = 1 / (1 + np.exp(-ctr_out[0, 0]))  # sigmoid, shape (H, W)
+            scores = np.sqrt(np.clip(cls_sigmoid * ctr_sigmoid, 0, 1))
 
             for r in range(H):
                 for c in range(W):
