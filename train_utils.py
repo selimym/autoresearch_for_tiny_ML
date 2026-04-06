@@ -43,21 +43,23 @@ COCO_ROOT: Path = Path(os.environ.get("COCO_ROOT", CACHE_DIR / "coco"))
 # ---------------------------------------------------------------------------
 
 def load_backbone(frozen_stages: int = 4) -> Tuple[nn.Module, List[int]]:
-    """Return (backbone, feature_channels) for MobileNetV4-Conv-S.
+    """
+    Load MNv4-Conv-S from timm with features_only=True, out_indices=(2,3,4).
+    Returns (backbone, feature_channels) for C3/C4/C5.
 
-    feature_channels are the C3/C4/C5 output channel counts:
-      - C3 (stride 8):  64 channels
-      - C4 (stride 16): 96 channels
-      - C5 (stride 32): 960 channels
+    feature_channels: actual channel counts from backbone.feature_info,
+    e.g. [64, 96, 960] for mobilenetv4_conv_small.e2400_r224_in1k.
 
-    Args:
-        frozen_stages: Number of backbone stages (children) to freeze.
-                       Counted from the top-level children:
-                         0 = conv_stem, 1 = bn1, 2 = act1, 3 = blocks[0],
-                         4 = blocks[0..1], …
-                       In practice, frozen_stages=4 freezes conv_stem +
-                       bn1 + act1 + blocks[0] (the first block group).
-                       Counted as the first N *top-level named children*.
+    frozen_stages controls how many top-level backbone children are frozen.
+    The backbone has 4 top-level children (conv_stem, bn1, act1, blocks).
+
+    frozen_stages=4: ALL frozen — fully frozen backbone (Phase 1 default)
+    frozen_stages=3: conv_stem + bn1 + act1 frozen, blocks trainable
+    frozen_stages=2: conv_stem + bn1 frozen
+    frozen_stages=0: all trainable
+
+    Phase 1 default (4): fastest experiments, backbone provides fixed features.
+    Phase 2-3 default (2): allows neck + backbone to co-adapt during QAT/pruning.
     """
     backbone = timm.create_model(
         "mobilenetv4_conv_small.e2400_r224_in1k",
@@ -75,15 +77,6 @@ def load_backbone(frozen_stages: int = 4) -> Tuple[nn.Module, List[int]]:
             break
         for param in module.parameters():
             param.requires_grad = False
-
-    # If frozen_stages covers all of conv_stem/bn1/act1 plus some block
-    # sub-stages inside `blocks`, handle that gracefully: the loop above
-    # already freezes whole top-level children; callers that want finer
-    # granularity should pass a larger frozen_stages value covering the
-    # desired number of top-level children (conv_stem, bn1, act1, blocks).
-    # For the common case of frozen_stages=4, we freeze:
-    #   child 0 = conv_stem, child 1 = bn1, child 2 = act1, child 3 = blocks
-    # i.e. the entire backbone is frozen except nothing when stages < 4.
 
     return backbone, feature_channels
 
@@ -185,7 +178,7 @@ class CocoPersonDataset(CocoDetection):
         return img_tensor, target
 
 
-def _collate_fn(batch):
+def collate_fn(batch):
     """Returns (list_of_tensors, list_of_target_dicts)."""
     imgs, targets = zip(*batch)
     return list(imgs), list(targets)
@@ -219,6 +212,11 @@ def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
     )
 
     if split == "train":
+        if not SUBSET_INDEX_PATH.exists():
+            raise FileNotFoundError(
+                f"Subset index not found at {SUBSET_INDEX_PATH}. "
+                "Run prepare.py first to download COCO and build the index."
+            )
         with open(SUBSET_INDEX_PATH) as f:
             subset_indices = json.load(f)
         dataset = torch.utils.data.Subset(dataset, subset_indices)
@@ -229,7 +227,7 @@ def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
         shuffle=(split == "train"),
         num_workers=4,
         pin_memory=True,
-        collate_fn=_collate_fn,
+        collate_fn=collate_fn,
     )
     return loader
 
@@ -250,7 +248,8 @@ def export_onnx(model: nn.Module, path: str, img_size: int = 320) -> str:
         The resolved path string.
     """
     model.eval()
-    dummy = torch.randn(1, 3, img_size, img_size)
+    device = next(model.parameters()).device
+    dummy = torch.randn(1, 3, img_size, img_size, device=device)
 
     torch.onnx.export(
         model,
@@ -277,4 +276,4 @@ def save_checkpoint(state: dict, path: str) -> None:
 
 def load_checkpoint(path: str) -> dict:
     """Load and return a checkpoint saved with :func:`save_checkpoint`."""
-    return torch.load(path, map_location="cpu")
+    return torch.load(path, map_location="cpu", weights_only=False)
