@@ -218,7 +218,9 @@ def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
                 "Run prepare.py first to download COCO and build the index."
             )
         with open(SUBSET_INDEX_PATH) as f:
-            subset_indices = json.load(f)
+            data = json.load(f)
+        # Support both plain list (legacy) and dict format from prepare.py
+        subset_indices = data["indices"] if isinstance(data, dict) else data
         dataset = torch.utils.data.Subset(dataset, subset_indices)
 
     loader = DataLoader(
