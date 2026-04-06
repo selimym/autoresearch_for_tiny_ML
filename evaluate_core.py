@@ -28,6 +28,9 @@ MLFLOW_URI: str = os.environ.get(
     "MLFLOW_TRACKING_URI", "sqlite:////.mlruns/mlruns.db"
 )
 
+# Spatial resolution used for mAP evaluation (must match initial_compress.py)
+IMG_SIZE: int = 320
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -35,26 +38,124 @@ MLFLOW_URI: str = os.environ.get(
 
 
 def _compute_map50(onnx_path: str) -> float:
-    """Compute mAP50 on COCO 2017 val set (person class only).
+    """Decode FCOS ONNX outputs and compute mAP50 on COCO val.
 
-    TODO: This is a stub returning 0.0 until the ONNX output format is
-    finalised in initial_compress.py (Task 8).  The full implementation
-    will:
-      - Run the ONNX model on every COCO 2017 val image using
-        onnxruntime CPUExecutionProvider.
-      - Decode FPN-level outputs: cls (1, 1, H, W) and reg (1, 4, H, W)
-        per stride level.
-      - Apply sigmoid to cls logits; apply NMS with iou_threshold=0.5
-        via torchvision.ops.nms.
-      - Accumulate COCO-format detections and evaluate with
-        pycocotools.cocoeval.COCOeval (catIds=[1]).
-      - Return evaluator.stats[1] (AP @ IoU=0.50).
+    ONNX output format (9 tensors from TinyDetector):
+        PyTorch exports (cls_list, reg_list, ctr_list) as a flat sequence.
+        The exact order depends on the return structure of forward():
+          - Grouped by type: cls0, cls1, cls2, reg0, reg1, reg2, ctr0, ctr1, ctr2
+        Output shapes (for 320×320 input):
+          cls_i: (1, 1, H_i, W_i)  — raw logits
+          reg_i: (1, 4, H_i, W_i)  — positive distances (already exp'd in model)
+          ctr_i: (1, 1, H_i, W_i)  — centerness logits
 
-    Once Task 8 defines the exact ONNX output format, replace the
-    ``return 0.0`` line below with the real decoder + evaluator.
+    This function auto-detects layout by inspecting output channel counts at
+    runtime: channel==1 → cls or ctr, channel==4 → reg.
     """
-    # Stub: real mAP computation pending model output format from Task 8.
-    return 0.0
+    import numpy as np
+    import onnxruntime as ort
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+    from torchvision.ops import nms
+    from train_utils import make_dataloader, CACHE_DIR
+
+    sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    all_inputs = sess.get_inputs()
+    input_name = all_inputs[0].name if all_inputs else "images"
+    strides = [8, 16, 32]  # P3, P4, P5 strides for 320×320 input
+    num_levels = len(strides)
+
+    ann_path = CACHE_DIR / "annotations" / "instances_val2017.json"
+    if not ann_path.exists():
+        print(f"[evaluate_core] Val annotations not found at {ann_path}. Returning 0.0")
+        return 0.0
+
+    coco_gt = COCO(str(ann_path))
+    val_loader = make_dataloader("val", batch_size=1, img_size=IMG_SIZE)
+
+    # Determine ONNX output layout by running once on a dummy input.
+    # Layout A (interleaved): cls0, reg0, ctr0, cls1, reg1, ctr1, cls2, reg2, ctr2
+    # Layout B (grouped):     cls0, cls1, cls2, reg0, reg1, reg2, ctr0, ctr1, ctr2
+    dummy_input = np.zeros((1, 3, IMG_SIZE, IMG_SIZE), dtype=np.float32)
+    probe = sess.run(None, {input_name: dummy_input})
+    if len(probe) == 9:
+        # Detect by channel dim: reg outputs have 4 channels, cls/ctr have 1
+        ch = [p.shape[1] for p in probe]
+        if ch[1] == 4:
+            # Layout A: cls, reg, ctr interleaved per level
+            layout = "interleaved"
+        else:
+            # Layout B: all cls, then all reg, then all ctr
+            layout = "grouped"
+    else:
+        layout = "interleaved"  # fallback
+
+    def _decode_level(outputs, level_idx, layout):
+        """Return (cls_out, reg_out) for the given level index."""
+        if layout == "interleaved":
+            base = level_idx * 3
+            return outputs[base], outputs[base + 1]
+        else:
+            # grouped: cls0..cls(n-1), reg0..reg(n-1), ctr0..ctr(n-1)
+            cls_out = outputs[level_idx]
+            reg_out = outputs[num_levels + level_idx]
+            return cls_out, reg_out
+
+    results = []
+    for imgs, targets in val_loader:
+        img_np = imgs[0].numpy()[None]  # (1, 3, H, W)
+        img_id = int(targets[0]["image_id"].item())
+
+        outputs = sess.run(None, {input_name: img_np})
+
+        all_boxes, all_scores = [], []
+        for level_idx, stride in enumerate(strides):
+            if level_idx * 3 >= len(outputs) and level_idx >= len(outputs):
+                break
+            cls_out, reg_out = _decode_level(outputs, level_idx, layout)
+
+            H, W = cls_out.shape[2], cls_out.shape[3]
+            scores = 1 / (1 + np.exp(-cls_out[0, 0]))  # sigmoid, shape (H, W)
+
+            for r in range(H):
+                for c in range(W):
+                    score = float(scores[r, c])
+                    if score < 0.05:  # confidence threshold
+                        continue
+                    cx = (c + 0.5) * stride
+                    cy = (r + 0.5) * stride
+                    l, t, r_dist, b = reg_out[0, :, r, c]
+                    x1 = cx - l
+                    y1 = cy - t
+                    x2 = cx + r_dist
+                    y2 = cy + b
+                    all_boxes.append([x1, y1, x2, y2])
+                    all_scores.append(score)
+
+        if all_boxes:
+            import torch
+            boxes_t = torch.tensor(all_boxes, dtype=torch.float32)
+            scores_t = torch.tensor(all_scores, dtype=torch.float32)
+            keep = nms(boxes_t, scores_t, iou_threshold=0.5)
+            for idx in keep.tolist():
+                x1, y1, x2, y2 = all_boxes[idx]
+                results.append({
+                    "image_id": img_id,
+                    "category_id": 1,
+                    "bbox": [x1, y1, x2 - x1, y2 - y1],
+                    "score": all_scores[idx],
+                })
+
+    if not results:
+        return 0.0
+
+    coco_dt = coco_gt.loadRes(results)
+    evaluator = COCOeval(coco_gt, coco_dt, "bbox")
+    evaluator.params.catIds = [1]
+    evaluator.evaluate()
+    evaluator.accumulate()
+    evaluator.summarize()
+    return float(evaluator.stats[1])  # AP @[.50]
 
 
 def _measure_cpu_latency_ms(onnx_path: str) -> float:
