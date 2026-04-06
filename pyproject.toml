@@ -24,6 +24,7 @@ dependencies = [
     # Literature search (optional)
     "semanticscholar>=0.8",
     "tavily-python>=0.3",
+    "onnxscript>=0.6.2",
 ]
 
 [build-system]
