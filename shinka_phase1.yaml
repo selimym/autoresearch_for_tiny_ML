@@ -52,7 +52,7 @@ evo_config:
   novelty_llm_kwargs:
     temperatures: [0]
 
-  embedding_model: text-embedding-3-small
+  embedding_model: gemini-embedding-exp-03-07
   code_embed_sim_threshold: 0.99
 
   task_sys_msg: |
