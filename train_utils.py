@@ -185,15 +185,24 @@ def collate_fn(batch):
     return list(imgs), list(targets)
 
 
-def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
+def make_dataloader(
+    split: str,
+    batch_size: int,
+    img_size: int,
+    subset_size: Optional[int] = None,
+) -> DataLoader:
     """Create a DataLoader for COCO 2017 person detection.
 
     Args:
-        split:      'train' or 'val'.
-        batch_size: Images per batch.
-        img_size:   Square canvas size (e.g. 320).
-
-    Train:  stratified 5 K subset defined by SUBSET_INDEX_PATH.
+        split:       'train' or 'val'.
+        batch_size:  Images per batch.
+        img_size:    Square canvas size (e.g. 320).
+        subset_size: Number of training images to use. ``None`` uses the
+                     default index at ``SUBSET_INDEX_PATH`` (5 K). Any other
+                     value selects ``CACHE_DIR/subset_<N>_index.json``,
+                     building it via ``prepare.build_subset_index`` on first
+                     use.
+    Train:  stratified subset defined by the resolved index file.
     Val:    full COCO 2017 val set (person annotations).
     """
     if split == "train":
@@ -213,23 +222,39 @@ def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
     )
 
     if split == "train":
-        if not SUBSET_INDEX_PATH.exists():
-            raise FileNotFoundError(
-                f"Subset index not found at {SUBSET_INDEX_PATH}. "
-                "Run prepare.py first to download COCO and build the index."
-            )
-        with open(SUBSET_INDEX_PATH) as f:
+        if subset_size is None:
+            index_path = SUBSET_INDEX_PATH
+        else:
+            index_path = CACHE_DIR / f"subset_{subset_size}_index.json"
+
+        if not index_path.exists():
+            if subset_size is None:
+                raise FileNotFoundError(
+                    f"Subset index not found at {index_path}. "
+                    "Run prepare.py first to download COCO and build the index."
+                )
+            # Build the requested index on first use
+            import prepare  # late import — prepare.py imports train_utils
+            print(f"Building subset index for {subset_size} images → {index_path}")
+            prepare.build_subset_index(CACHE_DIR, index_path, subset_size=subset_size)
+
+        with open(index_path) as f:
             data = json.load(f)
         # Support both plain list (legacy) and dict format from prepare.py
         subset_indices = data["indices"] if isinstance(data, dict) else data
         dataset = torch.utils.data.Subset(dataset, subset_indices)
 
+    # num_workers=0: eliminates 4 forked worker processes (each copies the full
+    # COCO annotation JSON into RAM). In WSL2 this is the dominant cause of OOM.
+    # pin_memory=False: page-locked memory is wasteful in WSL2 (no real CUDA DMA).
+    num_workers = int(os.environ.get("DATALOADER_WORKERS", "0"))
+    pin_mem = os.environ.get("DATALOADER_PIN_MEMORY", "0") == "1"
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(split == "train"),
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=pin_mem,
         collate_fn=collate_fn,
     )
     return loader
@@ -258,7 +283,7 @@ def export_onnx(model: nn.Module, path: str, img_size: int = 320) -> str:
         model,
         dummy,
         path,
-        opset_version=17,
+        opset_version=18,
         input_names=["images"],
         dynamic_axes={"images": {0: "batch"}},
         do_constant_folding=True,
