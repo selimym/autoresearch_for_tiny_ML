@@ -33,6 +33,9 @@ Three sequential overnight phases, each building on the previous best:
 # Install
 uv sync
 
+# Set your API key (Gemini is the default LLM — get a free key at aistudio.google.com)
+cp .env.example .env   # then edit .env and fill in GEMINI_API_KEY
+
 # One-time data setup (~20 min, downloads COCO 2017 val + annotations)
 uv run prepare.py
 
