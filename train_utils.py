@@ -36,7 +36,8 @@ CACHE_DIR: Path = Path(
 SUBSET_INDEX_PATH: Path = CACHE_DIR / "subset_5k_index.json"
 
 # COCO dataset root – override via env var if needed
-COCO_ROOT: Path = Path(os.environ.get("COCO_ROOT", CACHE_DIR / "coco"))
+# prepare.py downloads data directly into CACHE_DIR (no coco/ subdir)
+COCO_ROOT: Path = Path(os.environ.get("COCO_ROOT", CACHE_DIR))
 
 # ---------------------------------------------------------------------------
 # Backbone
@@ -196,10 +197,10 @@ def make_dataloader(split: str, batch_size: int, img_size: int) -> DataLoader:
     Val:    full COCO 2017 val set (person annotations).
     """
     if split == "train":
-        img_dir = COCO_ROOT / "images" / "train2017"
+        img_dir = COCO_ROOT / "train2017"
         ann_file = COCO_ROOT / "annotations" / "instances_train2017.json"
     elif split == "val":
-        img_dir = COCO_ROOT / "images" / "val2017"
+        img_dir = COCO_ROOT / "val2017"
         ann_file = COCO_ROOT / "annotations" / "instances_val2017.json"
     else:
         raise ValueError(f"split must be 'train' or 'val', got {split!r}")
