@@ -65,7 +65,7 @@ HEAD_STACKS = 3
 FROZEN_STAGES = 4
 LR = 1e-3
 EPOCHS = 4
-BATCH_SIZE = 32
+BATCH_SIZE = 8
 WARMUP_EPOCHS = 0.5
 IMG_SIZE = 320  # fixed — do not change
 
@@ -463,19 +463,24 @@ def run_experiment(seed: int = 1) -> dict:
         pct_start=WARMUP_EPOCHS / EPOCHS,
     )
 
+    from tqdm import tqdm
+
     model.train()
-    for epoch in range(EPOCHS):
-        for imgs, targets in train_loader:
-            imgs_t = torch.stack(imgs).to(device)
-            tgts = [{k: v.to(device) for k, v in t.items()} for t in targets]
-            optimizer.zero_grad()
-            cls_preds, reg_preds, ctr_preds = model(imgs_t)
-            loss = fcos_loss(cls_preds, reg_preds, ctr_preds, tgts, strides)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-            optimizer.step()
-            scheduler.step()
-        print(f"Epoch {epoch + 1}/{EPOCHS} done, loss={loss.item():.4f}")
+    total_steps = EPOCHS * len(train_loader)
+    with tqdm(total=total_steps, unit="batch", desc="Training") as pbar:
+        for epoch in range(EPOCHS):
+            for imgs, targets in train_loader:
+                imgs_t = torch.stack(imgs).to(device)
+                tgts = [{k: v.to(device) for k, v in t.items()} for t in targets]
+                optimizer.zero_grad()
+                cls_preds, reg_preds, ctr_preds = model(imgs_t)
+                loss = fcos_loss(cls_preds, reg_preds, ctr_preds, tgts, strides)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                optimizer.step()
+                scheduler.step()
+                pbar.set_postfix(epoch=f"{epoch + 1}/{EPOCHS}", loss=f"{loss.item():.4f}")
+                pbar.update(1)
 
     model.eval()
     onnx_path = "checkpoints/phase1_candidate.onnx"
