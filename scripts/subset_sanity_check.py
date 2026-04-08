@@ -28,7 +28,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Import the baseline build_model / fcos_loss from the gen-0 seed program
 # ---------------------------------------------------------------------------
-_GEN0 = Path(__file__).parent / "results" / "phase1" / "gen_0"
+_GEN0 = Path(__file__).parent.parent / "results" / "phase1" / "gen_0"
 sys.path.insert(0, str(_GEN0))
 from main import build_model, fcos_loss  # type: ignore[import]
 
