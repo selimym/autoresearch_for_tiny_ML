@@ -8,6 +8,8 @@ Agent greps:
   grep "^score:\\|^mAP50:\\|^model_size_mb:\\|^cpu_latency_ms:" run.log
 """
 import json
+import gc
+import os
 from pathlib import Path
 
 # =============================================================================
@@ -32,7 +34,7 @@ PRUNE_TYPE    = "l1_structured"  # "l1_structured" | "magnitude_unstructured"
 
 LR             = 1e-3
 EPOCHS         = 4
-BATCH_SIZE     = 32
+BATCH_SIZE     = int(os.environ.get("TRAINING_BATCH_SIZE", "8"))
 WARMUP_EPOCHS  = 0.5
 FROZEN_STAGES  = 2       # 2 = last 2 backbone stages unfrozen (Phases 2-3 default)
 IMG_SIZE       = 320     # fixed — do not change
@@ -312,6 +314,12 @@ def run_experiment():
             optimizer.step()
             scheduler.step()
         print(f"Epoch {epoch + 1}/{EPOCHS} done, loss={loss.item():.4f}")
+
+    # Free training objects before quantization — apply_quantization loads
+    # the val annotation JSON, and train_loader holds the train JSON.
+    # Having both alive simultaneously doubles the annotation RAM footprint.
+    del train_loader, optimizer, scheduler
+    gc.collect()
 
     # --- Phase 2: apply quantization after fine-tuning ---
     if QUANT_MODE != "none":

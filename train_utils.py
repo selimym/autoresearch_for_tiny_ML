@@ -244,17 +244,20 @@ def make_dataloader(
         subset_indices = data["indices"] if isinstance(data, dict) else data
         dataset = torch.utils.data.Subset(dataset, subset_indices)
 
-    # num_workers=0: eliminates 4 forked worker processes (each copies the full
+    # num_workers=0: eliminates forked worker processes (each copies the full
     # COCO annotation JSON into RAM). In WSL2 this is the dominant cause of OOM.
     # pin_memory=False: page-locked memory is wasteful in WSL2 (no real CUDA DMA).
+    # Run hw_config.py to get safe values for your hardware, or set env vars.
     num_workers = int(os.environ.get("DATALOADER_WORKERS", "0"))
     pin_mem = os.environ.get("DATALOADER_PIN_MEMORY", "0") == "1"
+    persistent = os.environ.get("DATALOADER_PERSISTENT_WORKERS", "0") == "1" and num_workers > 0
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(split == "train"),
         num_workers=num_workers,
         pin_memory=pin_mem,
+        persistent_workers=persistent,
         collate_fn=collate_fn,
     )
     return loader

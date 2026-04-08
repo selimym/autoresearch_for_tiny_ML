@@ -30,22 +30,35 @@ Three sequential overnight phases, each building on the previous best:
 ## Quick Start
 
 ```bash
-# Install
+# 1. Install
 uv sync
 
-# Set your API key (Gemini is the default LLM — get a free key at aistudio.google.com)
-cp .env.example .env   # then edit .env and fill in GEMINI_API_KEY
+# 2. API key (Gemini is the default LLM — free key at aistudio.google.com)
+cp .env.example .env   # edit .env and fill in GEMINI_API_KEY
 
-# One-time data setup (~20 min, downloads COCO 2017 val + annotations)
+# 3. Hardware config — detects your RAM/VRAM and sets safe batch_size,
+#    num_workers, pin_memory in .env automatically.
+#    WSL2 users: first give WSL more RAM (see WSL2 Memory below).
+uv run python hw_config.py           # print recommendations
+uv run python hw_config.py --export  # write them into .env
+
+# 4. One-time data setup (~20 min, downloads COCO 2017 val + annotations)
 uv run prepare.py
 
-# Smoke test architecture (no COCO required)
+# 5. Smoke test architecture (no COCO required)
 uv run python initial_compress.py
 
-# Smoke test full evaluation loop
+# 6. Smoke test full evaluation loop
 uv run python shinka_evaluate.py --program_path initial_compress.py --results_dir /tmp/smoke
 
-# Phase 1: overnight run
+# 7. Subset sanity check — trains the baseline on 5K/10K/20K subsets and
+#    recommends which training set size to use for Phase 1 experiments.
+#    Runs 3 sequential training+eval rounds; takes ~30-60 min on CPU.
+uv run subset_sanity_check.py
+# Or run one size at a time to reduce peak RAM:
+uv run subset_sanity_check.py --sizes 5000
+
+# 8. Phase 1: overnight architecture search
 uv run python run_phase1.py --config shinka_phase1.yaml
 
 # Morning: review and select
@@ -63,6 +76,35 @@ python handoff.py --phase 2
 # Pi benchmark (run on Pi):
 python benchmark_pi.py --model checkpoints/phase3_champion.onnx
 ```
+
+## WSL2 Memory
+
+By default WSL2 caps itself at ~50% of system RAM. If `hw_config.py` reports
+less RAM than your machine has, create `C:\Users\<you>\.wslconfig` on Windows:
+
+```ini
+[wsl2]
+memory=12GB    # adjust to ~75% of your physical RAM
+swap=4GB
+```
+
+Then restart WSL: `wsl --shutdown` (from a Windows terminal), reopen WSL, and
+re-run `hw_config.py --export` to update `.env` with the new limits.
+
+## Config reference
+
+`hw_config.py --export` writes these into `.env`; you can also set them manually:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TRAINING_BATCH_SIZE` | `8` | Batch size for training loops in `compress.py` and `subset_sanity_check.py` |
+| `DATALOADER_WORKERS` | `0` | DataLoader worker processes (each copies COCO JSON into RAM — 0 is safe on low-RAM machines) |
+| `DATALOADER_PIN_MEMORY` | `0` | Page-locked memory transfers (only useful with real CUDA DMA, not WSL2) |
+| `DATALOADER_PERSISTENT_WORKERS` | `0` | Keep workers alive between epochs (only when `WORKERS > 0`) |
+| `TRAINING_DEVICE` | `cpu` | `cuda` or `cpu` |
+
+> `initial_compress.py` is mutated by ShinkaEvolve agents and has its own
+> hardcoded `BATCH_SIZE = 8`. Agents may change this value as part of the search.
 
 ## Design
 

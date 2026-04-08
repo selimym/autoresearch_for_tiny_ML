@@ -10,6 +10,7 @@ Provides:
 
 from __future__ import annotations
 
+import gc
 import os
 import statistics
 import tempfile
@@ -150,6 +151,8 @@ def _compute_map50(onnx_path: str) -> float:
                 })
 
     if not results:
+        del coco_gt, val_loader
+        gc.collect()
         return 0.0
 
     coco_dt = coco_gt.loadRes(results)
@@ -158,7 +161,14 @@ def _compute_map50(onnx_path: str) -> float:
     evaluator.evaluate()
     evaluator.accumulate()
     evaluator.summarize()
-    return float(evaluator.stats[1])  # AP @[.50]
+    map50 = float(evaluator.stats[1])  # AP @[.50]
+
+    # Free the large annotation objects before returning — pycocotools COCO
+    # objects hold the full JSON in RAM and Python won't GC them promptly.
+    del coco_gt, coco_dt, evaluator, val_loader
+    gc.collect()
+
+    return map50
 
 
 def _measure_cpu_latency_ms(onnx_path: str) -> float:

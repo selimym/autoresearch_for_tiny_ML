@@ -13,6 +13,7 @@ Defaults: 2 epochs, sizes 5000/10000/20000.
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 import time
@@ -47,7 +48,7 @@ HEAD_CHANNELS = 64
 HEAD_STACKS    = 3
 FROZEN_STAGES  = 4
 LR             = 1e-3
-BATCH_SIZE     = 8
+BATCH_SIZE     = int(os.environ.get("TRAINING_BATCH_SIZE", "8"))
 IMG_SIZE       = 320
 STRIDES        = [8, 16, 32]
 
@@ -113,7 +114,18 @@ def run_for_size(subset_size: int, epochs: int, device: torch.device) -> dict:
     onnx_path = f"/tmp/sanity_check_{subset_size}.onnx"
     model.eval()
     export_onnx(model, onnx_path, IMG_SIZE)
+
+    # Free training objects before evaluation to avoid holding two annotation
+    # JSON copies (train + val) in RAM simultaneously on memory-constrained WSL2.
+    del train_loader, optimizer, scheduler
+    gc.collect()
+
     metrics = evaluate_model(onnx_path)
+
+    # Free model after evaluation; next run will allocate a fresh one.
+    del model
+    gc.collect()
+
     metrics["train_time_min"] = train_time / 60
     metrics["subset_size"]    = subset_size
     return metrics
