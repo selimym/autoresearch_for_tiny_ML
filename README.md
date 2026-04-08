@@ -16,6 +16,8 @@ Three sequential overnight phases, each building on the previous best:
 
 **Model:** MobileNetV4-Conv-S backbone (timm, frozen) + FPN neck with UIB blocks + FCOS head → INT8 ONNX for ARM CPU deployment.
 
+**Phase 1 uses [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve)** — SakanaAI's evolutionary program search framework — instead of the standard autoresearch loop. ShinkaEvolve runs LLM-driven mutation on `initial_compress.py` (the seed program) and maintains a Pareto archive of accuracy vs. size trade-offs across generations. This is better suited to architecture search than the linear autoresearch loop because it explores the search space non-linearly and keeps a diverse front of candidates rather than a single best. See `docs/architecture.md` for the full integration diagram and `shinka_phase1.yaml` for the search config.
+
 ## Results
 
 | Model | mAP50 | Size (MB) | Score | Pi 3B+ latency |
