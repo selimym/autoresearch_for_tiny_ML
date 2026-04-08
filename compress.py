@@ -93,6 +93,7 @@ def apply_pruning(model, prune_type: str, prune_ratio: float):
     Returns:
         model with pruning masks applied (in-place).
     """
+    import torch
     import torch.nn.utils.prune as prune
 
     if prune_ratio <= 0.0:
@@ -101,10 +102,10 @@ def apply_pruning(model, prune_type: str, prune_ratio: float):
     # Gather Conv2d layers from neck and head only (backbone stays intact)
     modules_to_prune = []
     for name, module in model.neck.named_modules():
-        if isinstance(module, __import__("torch").nn.Conv2d):
+        if isinstance(module, torch.nn.Conv2d):
             modules_to_prune.append((module, "weight"))
     for name, module in model.head.named_modules():
-        if isinstance(module, __import__("torch").nn.Conv2d):
+        if isinstance(module, torch.nn.Conv2d):
             modules_to_prune.append((module, "weight"))
 
     if not modules_to_prune:

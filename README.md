@@ -54,9 +54,9 @@ uv run python shinka_evaluate.py --program_path initial_compress.py --results_di
 # 7. Subset sanity check — trains the baseline on 5K/10K/20K subsets and
 #    recommends which training set size to use for Phase 1 experiments.
 #    Runs 3 sequential training+eval rounds; takes ~30-60 min on CPU.
-uv run subset_sanity_check.py
+uv run scripts/subset_sanity_check.py
 # Or run one size at a time to reduce peak RAM:
-uv run subset_sanity_check.py --sizes 5000
+uv run scripts/subset_sanity_check.py --sizes 5000
 
 # 8. Phase 1: overnight architecture search
 uv run python run_phase1.py --config shinka_phase1.yaml
@@ -74,7 +74,7 @@ python handoff.py --phase 2
 # ...
 
 # Pi benchmark (run on Pi):
-python benchmark_pi.py --model checkpoints/phase3_champion.onnx
+python scripts/benchmark_pi.py --model checkpoints/phase3_champion.onnx
 ```
 
 ## WSL2 Memory
@@ -106,16 +106,30 @@ re-run `hw_config.py --export` to update `.env` with the new limits.
 > `initial_compress.py` is mutated by ShinkaEvolve agents and has its own
 > hardcoded `BATCH_SIZE = 8`. Agents may change this value as part of the search.
 
-## Design
+## Project layout
 
-- **evaluate_core.py** — fixed shared evaluation (mAP50 via pycocotools, ONNX CPU latency, MLflow)
-- **initial_compress.py** — Phase 1 seed with `# EVOLVE-BLOCK-START/END` markers; ShinkaEvolve mutates the block
-- **compress.py** — Phase 2-3 single-file autoresearch target; agent edits quantization + pruning config blocks
-- **UIB blocks** — copied from MobileNetV4 into `blocks/` for in-repo reviewability
-- **evaluate.py** — OpenEvolve-compatible interface; also works as Phase 2-3 CLI evaluator
-- **handoff.py** — human-run phase transition: Pareto selection, checkpoint copy, branch creation
+```
+tinydet/              # shared library (backbone, data, ONNX I/O, hw detection)
+blocks/               # UIB blocks copied from MobileNetV4 (reviewable in-repo)
+scripts/              # one-off tools: subset_sanity_check.py, benchmark_pi.py
+docs/                 # architecture and phase guides
 
-See `docs/architecture.md` for full system diagram.
+# Pipeline entry points (root — required by ShinkaEvolve path resolution)
+initial_compress.py   # Phase 1 seed: EVOLVE-BLOCK mutated by ShinkaEvolve
+shinka_evaluate.py    # ShinkaEvolve evaluator adapter
+compress.py           # Phase 2-3: agent edits quantization + pruning blocks
+evaluate_core.py      # fixed shared evaluation (mAP50, latency, MLflow)
+evaluate.py           # CLI evaluator / OpenEvolve-compatible interface
+run_phase1.py         # Phase 1 launcher
+prepare.py            # one-time COCO data download + subset index builder
+handoff.py            # phase transition: Pareto selection, checkpoint copy
+hw_config.py          # hardware config advisor CLI
+train_utils.py        # re-export shim for tinydet.* (backwards compat)
+program_phase2.md     # Phase 2 agent instructions
+program_phase3.md     # Phase 3 agent instructions
+```
+
+See `docs/architecture.md` for the full system diagram.
 
 ## Score
 

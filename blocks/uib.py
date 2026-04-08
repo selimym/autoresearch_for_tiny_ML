@@ -17,8 +17,15 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from timm.layers import create_conv2d, DropPath, create_act_layer, create_aa, to_2tuple, LayerType,\
-    ConvNormAct, get_norm_act_layer, MultiQueryAttention2d, Attention2d
+from timm.layers.create_conv2d import create_conv2d
+from timm.layers.drop import DropPath
+from timm.layers.create_act import create_act_layer
+from timm.layers.blur_pool import create_aa
+from timm.layers.helpers import to_2tuple
+from timm.layers.typing import LayerType
+from timm.layers.conv_bn_act import ConvNormAct
+from timm.layers.create_norm_act import get_norm_act_layer
+from timm.layers.attention2d import MultiQueryAttention2d, Attention2d
 
 
 
@@ -73,7 +80,7 @@ class SqueezeExcite(nn.Module):
         super(SqueezeExcite, self).__init__()
         if rd_channels is None:
             rd_round_fn = rd_round_fn or round
-            rd_channels = rd_round_fn(in_chs * rd_ratio)
+            rd_channels = int(rd_round_fn(in_chs * rd_ratio))
         act_layer = force_act_layer or act_layer
         self.conv_reduce = nn.Conv2d(in_chs, rd_channels, 1, bias=True)
         self.act1 = create_act_layer(act_layer, inplace=True)
@@ -117,7 +124,7 @@ class ConvBnAct(nn.Module):
             stride=1 if use_aa else stride,
             dilation=dilation, groups=groups, padding=pad_type)
         self.bn1 = norm_act_layer(out_chs, inplace=True)
-        self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa)
+        self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa) if aa_layer is not None else nn.Identity()
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
 
     def feature_info(self, location):
@@ -187,7 +194,7 @@ class DepthwiseSeparableConv(nn.Module):
             stride=1 if use_aa else stride,
             dilation=dilation, padding=dw_pad_type, groups=groups)
         self.bn1 = norm_act_layer(in_chs, inplace=True)
-        self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa)
+        self.aa = create_aa(aa_layer, channels=out_chs, stride=stride, enable=use_aa) if aa_layer is not None else nn.Identity()
 
         # Squeeze-and-excitation
         self.se = se_layer(in_chs, act_layer=act_layer) if se_layer else nn.Identity()
@@ -282,7 +289,7 @@ class InvertedResidual(nn.Module):
             stride=1 if use_aa else stride,
             dilation=dilation, groups=groups, padding=dw_pad_type, **conv_kwargs)
         self.bn2 = norm_act_layer(mid_chs, inplace=True)
-        self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa)
+        self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa) if aa_layer is not None else nn.Identity()
 
         # Squeeze-and-excitation
         self.se = se_layer(mid_chs, act_layer=act_layer) if se_layer else nn.Identity()
@@ -485,7 +492,7 @@ class MobileAttention(nn.Module):
             key_dim: int = 64,
             value_dim: int = 64,
             use_multi_query: bool = False,
-            query_strides: int = (1, 1),
+            query_strides: int | tuple[int, int] = (1, 1),
             kv_stride: int = 1,
             cpe_dw_kernel_size: int = 3,
             noskip: bool = False,
@@ -502,6 +509,8 @@ class MobileAttention(nn.Module):
         super(MobileAttention, self).__init__()
         norm_act_layer = get_norm_act_layer(norm_layer, act_layer)
         self.has_skip = (stride == 1 and in_chs == out_chs) and not noskip
+        self._in_chs = in_chs
+        self._out_chs = out_chs
         self.query_strides = to_2tuple(query_strides)
         self.kv_stride = kv_stride
         self.has_query_stride = any([s > 1 for s in self.query_strides])
@@ -562,10 +571,10 @@ class MobileAttention(nn.Module):
         self.drop_path = DropPath(drop_path_rate) if drop_path_rate else nn.Identity()
 
     def feature_info(self, location):
-        if location == 'expansion':  # after SE, input to PW
-            return dict(module='conv_pw', hook_type='forward_pre', num_chs=self.conv_pw.in_channels)
+        if location == 'expansion':  # after SE, input to attn
+            return dict(module='attn', hook_type='forward_pre', num_chs=self._in_chs)
         else:  # location == 'bottleneck', block output
-            return dict(module='', num_chs=self.conv_pw.out_channels)
+            return dict(module='', num_chs=self._out_chs)
 
     def forward(self, x):
         if self.conv_cpe_dw is not None:
@@ -693,7 +702,7 @@ class EdgeResidual(nn.Module):
             dilation=dilation, groups=groups, padding=pad_type)
         self.bn1 = norm_act_layer(mid_chs, inplace=True)
 
-        self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa)
+        self.aa = create_aa(aa_layer, channels=mid_chs, stride=stride, enable=use_aa) if aa_layer is not None else nn.Identity()
 
         # Squeeze-and-excitation
         self.se = se_layer(mid_chs, act_layer=act_layer) if se_layer else nn.Identity()
