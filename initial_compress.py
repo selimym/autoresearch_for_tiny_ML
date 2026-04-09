@@ -11,6 +11,15 @@ refinement blocks → FCOS detection head.  Single class (person).
 import os
 os.makedirs("checkpoints", exist_ok=True)
 
+# ---------------------------------------------------------------------------
+# Fixed training recipe — NOT mutable by ShinkaEvolve.
+# Only neck/head architecture parameters inside the EVOLVE-BLOCK may change.
+# ---------------------------------------------------------------------------
+LR = 1e-3
+EPOCHS = 4
+BATCH_SIZE = 8
+WARMUP_EPOCHS = 0.5
+
 # EVOLVE-BLOCK-START
 """
 FPN + FCOS detector seeded for ShinkaEvolve Phase 1.
@@ -63,10 +72,6 @@ UIB_CONFIGS = [
 HEAD_CHANNELS = 64
 HEAD_STACKS = 3
 FROZEN_STAGES = 4
-LR = 1e-3
-EPOCHS = 4
-BATCH_SIZE = 8
-WARMUP_EPOCHS = 0.5
 IMG_SIZE = 320  # fixed — do not change
 
 
@@ -286,6 +291,15 @@ def fcos_loss(cls_preds, reg_preds, ctr_preds, targets, strides):
     total_ctr_loss = torch.tensor(0.0, device=device)
     total_pos = 0
 
+    # Scale-of-interest thresholds per FPN level (area in pixels²).
+    # P3 (stride 8): small objects; P4 (stride 16): medium; P5 (stride 32): large.
+    # Overlapping boundaries reduce missed assignments at scale transitions.
+    _SOI_MIN = [0,      32**2,  64**2]   # inclusive lower bound per level
+    _SOI_MAX = [96**2,  192**2, float("inf")]  # exclusive upper bound per level
+    # Center-sampling radius: only points within this many strides of the
+    # GT box center are eligible (reduces noisy positives at box boundaries).
+    _CENTER_RADIUS = 1.5
+
     for lvl_idx, stride in enumerate(strides):
         cls_pred = cls_preds[lvl_idx]   # (B, 1, H, W)
         reg_pred = reg_preds[lvl_idx]   # (B, 4, H, W)
@@ -303,6 +317,10 @@ def fcos_loss(cls_preds, reg_preds, ctr_preds, targets, strides):
         cx_flat = cx.reshape(-1)
         cy_flat = cy.reshape(-1)
         num_pts = H * W
+
+        soi_min = _SOI_MIN[lvl_idx]
+        soi_max = _SOI_MAX[lvl_idx]
+        center_r = _CENTER_RADIUS * stride
 
         # Per-image processing
         for img_idx in range(B):
@@ -326,23 +344,37 @@ def fcos_loss(cls_preds, reg_preds, ctr_preds, targets, strides):
                 )
                 continue
 
-            # For each GT box determine which points fall inside it
             # gt_boxes: (N, 4) — x1, y1, x2, y2
             x1 = gt_boxes[:, 0]  # (N,)
             y1 = gt_boxes[:, 1]
             x2 = gt_boxes[:, 2]
             y2 = gt_boxes[:, 3]
+            areas = (x2 - x1) * (y2 - y1)  # (N,)
+
+            # Scale-of-interest filter: only assign GT boxes whose area falls
+            # within this level's range. This gives each level a specialised
+            # scale so small objects don't leak into P5 and vice versa.
+            soi_valid = (areas >= soi_min) & (areas < soi_max)  # (N,)
+
+            # Center-sampling: a point is eligible for GT box n only if it
+            # lies within center_r of the box's geometric centre.
+            cx_gt = ((x1 + x2) / 2).unsqueeze(1)  # (N, 1)
+            cy_gt = ((y1 + y2) / 2).unsqueeze(1)  # (N, 1)
+            in_center = (
+                (cx_flat.unsqueeze(0) - cx_gt).abs() < center_r
+            ) & (
+                (cy_flat.unsqueeze(0) - cy_gt).abs() < center_r
+            )  # (N, H*W)
 
             # cx_flat: (H*W,) → broadcast with (N,) → (N, H*W)
             inside_x = (cx_flat.unsqueeze(0) > x1.unsqueeze(1)) & \
                        (cx_flat.unsqueeze(0) < x2.unsqueeze(1))
             inside_y = (cy_flat.unsqueeze(0) > y1.unsqueeze(1)) & \
                        (cy_flat.unsqueeze(0) < y2.unsqueeze(1))
-            inside = inside_x & inside_y  # (N, H*W)
+            inside = inside_x & inside_y & in_center  # (N, H*W)
 
-            # For each point, assign to smallest GT box that contains it
-            # (area-based assignment)
-            areas = (x2 - x1) * (y2 - y1)  # (N,)
+            # Apply scale-of-interest: mask out GT boxes outside this level's range
+            inside = inside & soi_valid.unsqueeze(1)  # (N, H*W)
 
             # Encode positive points
             pos_mask = inside.any(dim=0)  # (H*W,) — at least one GT contains it
@@ -506,6 +538,8 @@ def run_experiment(seed: int = 1) -> dict:
     return {
         "score": metrics["score"],
         "mAP50": metrics["mAP50"],
+        "mAP": metrics["mAP"],
+        "AP_small": metrics["AP_small"],
         "model_size_mb": metrics["model_size_mb"],
         "cpu_latency_ms": metrics["cpu_latency_ms"],
     }
