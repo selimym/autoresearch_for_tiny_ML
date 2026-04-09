@@ -12,13 +12,15 @@ import gc
 import os
 from pathlib import Path
 
+from onnxruntime.quantization import quantize_static, CalibrationDataReader, QuantType
+
 # =============================================================================
 # PHASE 2 — Quantization (backbone + neck architecture locked from Phase 1)
 # Agent varies: quant mode, calibration strategy, per-channel vs per-tensor
 # =============================================================================
 
-QUANT_MODE    = "none"    # "none" | "ptq_int8" | "qat_int8" | "ptq_int4" | "dynamic"
-CALIB_BATCHES = 16        # calibration batches for PTQ observers
+QUANT_MODE    = "none"    # "none" | "ptq_int8_static"
+CALIB_BATCHES = 16        # kept for compatibility; calibration uses 50 val images
 
 # =============================================================================
 # PHASE 3 — Pruning (loads Phase 2 best from handoff.json)
@@ -135,117 +137,52 @@ def apply_pruning(model, prune_type: str, prune_ratio: float):
 # Quantization
 # ---------------------------------------------------------------------------
 
-def apply_quantization(model, quant_mode: str, calib_batches: int):
-    """Apply post-training or quantization-aware quantization to the model.
+class _ValCalibrationDataReader(CalibrationDataReader):
+    """Feeds ~50 val images to onnxruntime quantize_static as calibration data."""
+
+    def __init__(self, input_name: str, img_size: int):
+        from tinydet.data import make_dataloader
+        import numpy as np
+
+        calib_loader = make_dataloader("val", batch_size=1, img_size=img_size)
+        self._data = []
+        for imgs, _ in calib_loader:
+            if len(self._data) >= 50:
+                break
+            img_np = imgs[0].numpy()[None].astype(np.float32)  # (1, 3, H, W)
+            self._data.append({input_name: img_np})
+        self._iter = iter(self._data)
+
+    def get_next(self):
+        return next(self._iter, None)
+
+
+def quantize_onnx_static(float_onnx_path: str, quant_onnx_path: str) -> str:
+    """Quantize a float ONNX model to INT8 using static PTQ with calibration data.
 
     Args:
-        model:         TinyDetector (float32, already fine-tuned).
-        quant_mode:    one of "none" | "ptq_int8" | "qat_int8" | "ptq_int4" | "dynamic"
-        calib_batches: number of calibration batches used for PTQ observers.
+        float_onnx_path: path to the float32 ONNX model produced by export_onnx.
+        quant_onnx_path: output path for the quantized INT8 ONNX model.
 
     Returns:
-        Quantized (or unchanged) model in eval mode.
+        quant_onnx_path (the path to the quantized model).
     """
-    import torch
-    from train_utils import make_dataloader
+    import onnxruntime as ort
 
-    if quant_mode == "none":
-        return model.eval()
+    # Determine the model's input name for the calibration reader.
+    sess = ort.InferenceSession(float_onnx_path, providers=["CPUExecutionProvider"])
+    input_name = sess.get_inputs()[0].name
+    del sess
 
-    device = next(model.parameters()).device
+    calibration_reader = _ValCalibrationDataReader(input_name, IMG_SIZE)
 
-    if quant_mode == "dynamic":
-        # Dynamic quantization: weights INT8, activations quantized at runtime
-        import torch.quantization as tq
-        model.eval().cpu()
-        quantized = tq.quantize_dynamic(
-            model,
-            {torch.nn.Conv2d, torch.nn.Linear},
-            dtype=torch.qint8,
-        )
-        return quantized
-
-    if quant_mode in ("ptq_int8", "ptq_int4"):
-        import torch.quantization as tq
-
-        model.eval().cpu()
-
-        # Use per-channel quantization for better accuracy
-        if quant_mode == "ptq_int8":
-            qconfig = tq.get_default_qconfig("fbgemm")
-        else:
-            # INT4: use reduce-range per-channel observer (approximates 4-bit)
-            from torch.quantization.observer import PerChannelMinMaxObserver, MinMaxObserver
-            qconfig = tq.QConfig(
-                activation=MinMaxObserver.with_args(
-                    dtype=torch.quint8,
-                    reduce_range=True,
-                ),
-                weight=PerChannelMinMaxObserver.with_args(
-                    dtype=torch.qint8,
-                    qscheme=torch.per_channel_symmetric,
-                    reduce_range=True,
-                ),
-            )
-
-        model.qconfig = qconfig
-        tq.prepare(model, inplace=True)
-
-        # Calibration pass
-        calib_loader = make_dataloader("val", BATCH_SIZE, IMG_SIZE)
-        model.eval()
-        with torch.no_grad():
-            for batch_idx, (imgs, _) in enumerate(calib_loader):
-                if batch_idx >= calib_batches:
-                    break
-                imgs_t = torch.stack(imgs).cpu()
-                model(imgs_t)
-
-        tq.convert(model, inplace=True)
-        return model
-
-    if quant_mode == "qat_int8":
-        import torch.quantization as tq
-        import torch.optim as optim
-        from torch.optim.lr_scheduler import OneCycleLR
-        from train_utils import make_dataloader
-
-        model.train().cpu()
-        qconfig = tq.get_default_qat_qconfig("fbgemm")
-        model.qconfig = qconfig
-        tq.prepare_qat(model, inplace=True)
-
-        # Short QAT fine-tuning (uses same EPOCHS / LR / BATCH_SIZE settings)
-        train_loader = make_dataloader("train", BATCH_SIZE, IMG_SIZE)
-        trainable = [p for p in model.parameters() if p.requires_grad]
-        optimizer = optim.AdamW(trainable, lr=LR * 0.1, weight_decay=1e-4)
-        scheduler = OneCycleLR(
-            optimizer,
-            max_lr=LR * 0.1,
-            total_steps=EPOCHS * len(train_loader),
-            pct_start=WARMUP_EPOCHS / max(EPOCHS, 1),
-        )
-
-        from initial_compress import fcos_loss
-        strides = [8, 16, 32]
-
-        for epoch in range(EPOCHS):
-            for imgs, targets in train_loader:
-                imgs_t = torch.stack(imgs).cpu()
-                tgts = [{k: v.cpu() for k, v in t.items()} for t in targets]
-                optimizer.zero_grad()
-                cls_preds, reg_preds, ctr_preds = model(imgs_t)
-                loss = fcos_loss(cls_preds, reg_preds, ctr_preds, tgts, strides)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
-                optimizer.step()
-                scheduler.step()
-            print(f"QAT epoch {epoch + 1}/{EPOCHS} done, loss={loss.item():.4f}")
-
-        tq.convert(model.eval(), inplace=True)
-        return model
-
-    raise ValueError(f"Unknown QUANT_MODE: {quant_mode!r}")
+    quantize_static(
+        float_onnx_path,
+        quant_onnx_path,
+        calibration_reader,
+        weight_type=QuantType.QInt8,
+    )
+    return quant_onnx_path
 
 
 # ---------------------------------------------------------------------------
@@ -316,30 +253,41 @@ def run_experiment():
             scheduler.step()
         print(f"Epoch {epoch + 1}/{EPOCHS} done, loss={loss.item():.4f}")
 
-    # Free training objects before quantization — apply_quantization loads
+    # Free training objects before quantization — calibration data reader loads
     # the val annotation JSON, and train_loader holds the train JSON.
     # Having both alive simultaneously doubles the annotation RAM footprint.
     del train_loader, optimizer, scheduler
     gc.collect()
 
-    # --- Phase 2: apply quantization after fine-tuning ---
-    if QUANT_MODE != "none":
-        print(f"Applying quantization: mode={QUANT_MODE}, calib_batches={CALIB_BATCHES}")
-        model = apply_quantization(model, QUANT_MODE, CALIB_BATCHES)
-    else:
-        model.eval()
-
     # --- Export and evaluate ---
+    float_onnx_path = "checkpoints/compress_candidate_float.onnx"
     onnx_path = "checkpoints/compress_candidate.onnx"
-    # If quantized ONNX export fails, mark the run INVALID and abort.
+
+    model.eval()
+    # If ONNX export or quantization fails, mark the run INVALID and abort.
     # Never silently fall back to evaluating an unquantized model — that
     # would produce misleading metrics for a "quantized" experiment.
     try:
-        export_onnx(model, onnx_path, IMG_SIZE)
+        export_onnx(model, float_onnx_path, IMG_SIZE)
     except Exception as e:
         print(f"ERROR: ONNX export failed for QUANT_MODE={QUANT_MODE}: {e}")
         print("status:INVALID")
         raise SystemExit(1) from e
+
+    # --- Phase 2: apply static PTQ quantization after export ---
+    if QUANT_MODE == "ptq_int8_static":
+        print(f"Applying quantization: mode={QUANT_MODE}")
+        try:
+            quantize_onnx_static(float_onnx_path, onnx_path)
+        except Exception as e:
+            print(f"ERROR: ONNX static quantization failed for QUANT_MODE={QUANT_MODE}: {e}")
+            print("status:INVALID")
+            raise SystemExit(1) from e
+    elif QUANT_MODE == "none":
+        import shutil
+        shutil.copy2(float_onnx_path, onnx_path)
+    else:
+        raise ValueError(f"Unknown QUANT_MODE: {QUANT_MODE!r}")
 
     metrics = evaluate_model(onnx_path)
 
