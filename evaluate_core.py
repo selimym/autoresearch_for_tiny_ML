@@ -5,7 +5,7 @@ Fixed file: never modified by agents.
 
 Provides:
   evaluate_model(model_or_path) -> dict[str, float]
-    Returns: {score, mAP50, model_size_mb, cpu_latency_ms, params_M}
+    Returns: {score, mAP50, mAP, AP_small, model_size_mb, cpu_latency_ms, params_M}
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ IMG_SIZE: int = 320
 # ---------------------------------------------------------------------------
 
 
-def _compute_map50(onnx_path: str) -> float:
-    """Decode FCOS ONNX outputs and compute mAP50 on COCO val.
+def _compute_coco_metrics(onnx_path: str) -> dict[str, float]:
+    """Decode FCOS ONNX outputs and compute COCO metrics on COCO val.
 
     ONNX output format (9 tensors from TinyDetector):
         PyTorch exports (cls_list, reg_list, ctr_list) as a flat sequence.
@@ -153,7 +153,7 @@ def _compute_map50(onnx_path: str) -> float:
     if not results:
         del coco_gt, val_loader
         gc.collect()
-        return 0.0
+        return {"mAP50": 0.0, "mAP": 0.0, "AP_small": 0.0}
 
     coco_dt = coco_gt.loadRes(results)
     evaluator = COCOeval(coco_gt, coco_dt, "bbox")
@@ -161,14 +161,19 @@ def _compute_map50(onnx_path: str) -> float:
     evaluator.evaluate()
     evaluator.accumulate()
     evaluator.summarize()
-    map50 = float(evaluator.stats[1])  # AP @[.50]
+    # stats[0] = AP@[.50:.95], stats[1] = AP@.50, stats[3] = AP_small
+    coco_metrics = {
+        "mAP50": float(evaluator.stats[1]),
+        "mAP": float(evaluator.stats[0]),
+        "AP_small": float(evaluator.stats[3]),
+    }
 
     # Free the large annotation objects before returning — pycocotools COCO
     # objects hold the full JSON in RAM and Python won't GC them promptly.
     del coco_gt, coco_dt, evaluator, val_loader
     gc.collect()
 
-    return map50
+    return coco_metrics
 
 
 def _measure_cpu_latency_ms(onnx_path: str) -> float:
@@ -238,6 +243,8 @@ def evaluate_model(model_or_path: Union[nn.Module, str]) -> dict[str, float]:
         - ``score``          – composite score (mAP50 / model_size_mb if
                                mAP50 >= 0.15, else 0.0)
         - ``mAP50``          – AP at IoU=0.50 on COCO val (person class)
+        - ``mAP``            – AP at IoU=[0.50:0.95] on COCO val (person class)
+        - ``AP_small``       – AP for small objects (area < 32²) on COCO val
         - ``model_size_mb``  – size of the ONNX file in MB
         - ``cpu_latency_ms`` – median CPU inference latency in ms
         - ``params_M``       – parameter count in millions (0.0 if a path
@@ -267,16 +274,30 @@ def evaluate_model(model_or_path: Union[nn.Module, str]) -> dict[str, float]:
     # ------------------------------------------------------------------ #
     # Compute metrics                                                     #
     # ------------------------------------------------------------------ #
+    # Score formula: mAP50 / (alpha * size_mb + (1-alpha) * latency_norm)
+    # Balances model size and actual runtime — latency is a first-class
+    # search objective for ARM deployment (feedback Tier 3).
+    _SCORE_ALPHA = 0.5           # weight on size vs latency
+    _LATENCY_BASELINE_MS = 100.0  # ARM Cortex-A53 reference latency (ms)
+
     try:
-        mAP50 = _compute_map50(onnx_path)
+        coco_metrics = _compute_coco_metrics(onnx_path)
+        mAP50 = coco_metrics["mAP50"]
         size_mb = _model_size_mb(onnx_path)
         latency_ms = _measure_cpu_latency_ms(onnx_path)
 
-        score = mAP50 / size_mb if mAP50 >= 0.15 and size_mb > 0 else 0.0
+        if mAP50 >= 0.15 and size_mb > 0:
+            latency_norm = latency_ms / _LATENCY_BASELINE_MS
+            denom = _SCORE_ALPHA * size_mb + (1 - _SCORE_ALPHA) * latency_norm
+            score = mAP50 / denom if denom > 0 else 0.0
+        else:
+            score = 0.0
 
         metrics: dict[str, float] = {
             "score": score,
             "mAP50": mAP50,
+            "mAP": coco_metrics["mAP"],
+            "AP_small": coco_metrics["AP_small"],
             "model_size_mb": size_mb,
             "cpu_latency_ms": latency_ms,
             "params_M": params_M,

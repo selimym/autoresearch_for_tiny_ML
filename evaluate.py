@@ -41,6 +41,8 @@ def main():
     # Print --- block (agent greps this)
     print("---")
     print(f"mAP50:          {metrics['mAP50']:.6f}")
+    print(f"mAP:            {metrics['mAP']:.6f}")
+    print(f"AP_small:       {metrics['AP_small']:.6f}")
     print(f"model_size_mb:  {metrics['model_size_mb']:.2f}")
     print(f"cpu_latency_ms: {metrics['cpu_latency_ms']:.1f}")
     print(f"params_M:       {metrics['params_M']:.2f}")
