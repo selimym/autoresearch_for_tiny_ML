@@ -331,16 +331,15 @@ def run_experiment():
 
     # --- Export and evaluate ---
     onnx_path = "checkpoints/compress_candidate.onnx"
-    # Quantized models may not export cleanly; fall back to float eval path
+    # If quantized ONNX export fails, mark the run INVALID and abort.
+    # Never silently fall back to evaluating an unquantized model — that
+    # would produce misleading metrics for a "quantized" experiment.
     try:
         export_onnx(model, onnx_path, IMG_SIZE)
     except Exception as e:
-        print(f"WARNING: ONNX export failed ({e}); evaluating float model.")
-        model_float = model
-        # Re-export without quantization for evaluation only
-        onnx_path_fallback = "checkpoints/compress_candidate_float.onnx"
-        export_onnx(model_float, onnx_path_fallback, IMG_SIZE)
-        onnx_path = onnx_path_fallback
+        print(f"ERROR: ONNX export failed for QUANT_MODE={QUANT_MODE}: {e}")
+        print("status:INVALID")
+        raise SystemExit(1) from e
 
     metrics = evaluate_model(onnx_path)
 
@@ -372,6 +371,8 @@ if __name__ == "__main__":
     print("---")
     print(f"score:{metrics['score']:.6f}")
     print(f"mAP50:{metrics['mAP50']:.6f}")
+    print(f"mAP:{metrics['mAP']:.6f}")
+    print(f"AP_small:{metrics['AP_small']:.6f}")
     print(f"model_size_mb:{metrics['model_size_mb']:.3f}")
     print(f"cpu_latency_ms:{metrics['cpu_latency_ms']:.1f}")
     print("---")
