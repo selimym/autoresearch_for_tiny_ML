@@ -39,10 +39,19 @@ class CocoPersonDataset(CocoDetection):
         img, annotations = super().__getitem__(index)
 
         orig_w, orig_h = img.size
-        scale_x = self.img_size / orig_w
-        scale_y = self.img_size / orig_h
 
-        img = TF.resize(img, [self.img_size, self.img_size])
+        # Letterbox: uniform scale preserving aspect ratio, pad with gray (128)
+        scale = min(self.img_size / orig_w, self.img_size / orig_h)
+        new_w = int(round(orig_w * scale))
+        new_h = int(round(orig_h * scale))
+        img = TF.resize(img, [new_h, new_w])
+
+        pad_left = (self.img_size - new_w) // 2
+        pad_top = (self.img_size - new_h) // 2
+        pad_right = self.img_size - new_w - pad_left
+        pad_bottom = self.img_size - new_h - pad_top
+        # TF.pad takes (left, top, right, bottom) and fills with 128 (mid-gray)
+        img = TF.pad(img, [pad_left, pad_top, pad_right, pad_bottom], fill=128)
 
         boxes: List[List[float]] = []
         labels: List[int] = []
@@ -54,10 +63,10 @@ class CocoPersonDataset(CocoDetection):
             x, y, w, h = ann["bbox"]
             if w <= 0 or h <= 0:
                 continue
-            x1 = max(0.0, min(x * scale_x, self.img_size))
-            y1 = max(0.0, min(y * scale_y, self.img_size))
-            x2 = max(0.0, min((x + w) * scale_x, self.img_size))
-            y2 = max(0.0, min((y + h) * scale_y, self.img_size))
+            x1 = max(0.0, min(x * scale + pad_left, self.img_size))
+            y1 = max(0.0, min(y * scale + pad_top, self.img_size))
+            x2 = max(0.0, min((x + w) * scale + pad_left, self.img_size))
+            y2 = max(0.0, min((y + h) * scale + pad_top, self.img_size))
             if x2 > x1 and y2 > y1:
                 boxes.append([x1, y1, x2, y2])
                 labels.append(_COCO_PERSON_CATEGORY_ID)
@@ -66,6 +75,37 @@ class CocoPersonDataset(CocoDetection):
             img = TF.hflip(img)
             W = float(self.img_size)
             boxes = [[W - b[2], b[1], W - b[0], b[3]] for b in boxes]
+
+        # Scale jitter (training only): resize image ±20% then crop/pad to img_size
+        if self.split == "train" and random.random() < 0.5:
+            jitter = random.uniform(0.8, 1.2)
+            jitter_size = int(round(self.img_size * jitter))
+            img = TF.resize(img, [jitter_size, jitter_size])
+            if jitter_size > self.img_size:
+                # Center-crop back to img_size; boxes shift by the crop offset
+                img = TF.center_crop(img, self.img_size)
+                xy_offset = -((jitter_size - self.img_size) // 2)
+            else:
+                # Pad back to img_size (asymmetric to avoid off-by-one)
+                pl = (self.img_size - jitter_size) // 2
+                pr = self.img_size - jitter_size - pl
+                img = TF.pad(img, [pl, pl, pr, pr], fill=128)
+                xy_offset = pl
+            new_boxes, new_labels = [], []
+            for b, lbl in zip(boxes, labels):
+                x1 = max(0.0, min(b[0] * jitter + xy_offset, self.img_size))
+                y1 = max(0.0, min(b[1] * jitter + xy_offset, self.img_size))
+                x2 = max(0.0, min(b[2] * jitter + xy_offset, self.img_size))
+                y2 = max(0.0, min(b[3] * jitter + xy_offset, self.img_size))
+                if x2 > x1 and y2 > y1:
+                    new_boxes.append([x1, y1, x2, y2])
+                    new_labels.append(lbl)
+            boxes, labels = new_boxes, new_labels
+
+        # Color jitter (training only): brightness and contrast ±0.2
+        if self.split == "train":
+            img = TF.adjust_brightness(img, 1.0 + random.uniform(-0.2, 0.2))
+            img = TF.adjust_contrast(img, 1.0 + random.uniform(-0.2, 0.2))
 
         img_tensor = TF.normalize(TF.to_tensor(img), mean=_MEAN, std=_STD)
 
