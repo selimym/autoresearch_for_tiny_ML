@@ -36,14 +36,13 @@ evo_config:
   job_type: local
 
   llm_models:
-    - "claude-sonnet-4-6"
     - "gemini-2.0-flash"
   llm_kwargs:
-    temperatures: [0.5, 1.0]
+    temperatures: [1.0]
     max_tokens: 8192
 
   meta_rec_interval: 5
-  meta_llm_models: ["claude-sonnet-4-6"]
+  meta_llm_models: ["gemini-2.0-flash"]
   meta_llm_kwargs:
     temperatures: [0]
     max_tokens: 8192
@@ -61,9 +60,11 @@ evo_config:
     and FCOS head of a MobileNetV4-Conv-Small person detector.
 
     Key objectives (in order):
-    1. Maximize score = mAP50 / model_size_mb (higher is better)
+    1. Maximize score = mAP50 / (0.5 * model_size_mb + 0.5 * cpu_latency_ms/100)
+       Latency is now a first-class term: a compact model that is slow on ARM
+       scores the same as a larger but faster model. Baseline = 100 ms.
     2. Keep mAP50 >= 0.15 (floor threshold — below this, score = 0)
-    3. Minimize cpu_latency_ms (ARM Cortex-A53 target)
+    3. Both model_size_mb and cpu_latency_ms matter equally (alpha = 0.5)
 
     UIB block variant reference (set via dw_kernel_size_*):
     - Inverted Bottleneck (IB):  dw_start=0, dw_mid=3, dw_end=0
@@ -71,12 +72,16 @@ evo_config:
     - ExtraDW:                   dw_start=3, dw_mid=3, dw_end=0
     - FFN/Pointwise:             dw_start=0, dw_mid=0, dw_end=0
 
-    Architecture decisions that matter most:
+    Architecture decisions that matter most (ONLY these may be mutated):
     - NECK_CHANNELS: wider = more capacity but larger model
     - UIB_CONFIGS exp_ratio: 2.0-8.0 range; higher = more capacity
     - HEAD_STACKS: 2-4 range
     - HEAD_CHANNELS: 32-128 range
     - FPN vs PAN: try top-down-only vs bidirectional fusion in FPNNeck
-    - Training: LR (5e-4 to 3e-3), EPOCHS (3-6), BATCH_SIZE (16-64)
+
+    DO NOT change LR, EPOCHS, BATCH_SIZE, or WARMUP_EPOCHS — the training
+    recipe is fixed outside the EVOLVE-BLOCK so that only architecture
+    differences drive score changes. Mutations to training hyperparameters
+    will be rejected.
 
   evolve_prompts: false
