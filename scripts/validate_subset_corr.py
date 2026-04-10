@@ -178,8 +178,8 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-3,
                         help="Learning rate (default: 1e-3)")
-    parser.add_argument("--seeds", type=int, default=1,
-                        help="Number of random seeds per (candidate, subset) pair (default: 1)")
+    parser.add_argument("--seeds", type=int, default=2,
+                        help="Number of random seeds per (candidate, subset) pair (default: 2)")
     parser.add_argument("--out", default="results/subset_corr.tsv",
                         help="Output TSV path (default: results/subset_corr.tsv)")
     args = parser.parse_args()
@@ -229,9 +229,10 @@ def main() -> None:
 
         cand_dir = _find_candidate_dir(results_dir, commit)
         if cand_dir is None:
-            cand_dir = _ROOT
-            print(f"  WARNING: could not find generation dir for {commit[:8]}, "
-                  f"falling back to initial_compress.py")
+            print(f"  ERROR: could not resolve artifact dir for commit {commit[:8]} — "
+                  f"skipping. Check that results_dir={results_dir} contains the "
+                  f"candidate's evolved program files.")
+            continue
         try:
             mod = _load_program_from_results(cand_dir)
         except FileNotFoundError as e:

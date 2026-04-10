@@ -232,17 +232,17 @@ def main() -> None:
         # Locate the program file for this candidate
         cand_dir = _find_candidate_dir(results_dir, commit)
         if cand_dir is None:
-            # Fall back: use the seed program (initial_compress.py)
-            cand_dir = _ROOT
-            print(f"  WARNING: could not find generation dir for {commit[:8]}, "
-                  f"falling back to initial_compress.py")
+            print(f"  ERROR: could not resolve artifact dir for commit {commit[:8]} — "
+                  f"skipping. Check that results_dir={results_dir} contains gen_* "
+                  f"directories with the evolved program files.")
+            continue
         try:
             mod = _load_program_from_results(cand_dir)
         except FileNotFoundError as e:
             print(f"  SKIP: {e}")
             continue
 
-        seed_maps: list[float] = []
+        seed_results: list[dict] = []
         for seed in range(1, args.seeds + 1):
             print(f"  seed {seed}/{args.seeds} ...")
             t0 = time.perf_counter()
@@ -261,7 +261,7 @@ def main() -> None:
                 print(f"  ERROR (seed {seed}): {exc}")
                 continue
             elapsed = time.perf_counter() - t0
-            seed_maps.append(metrics["mAP50"])
+            seed_results.append(metrics)
             print(f"    mAP50={metrics['mAP50']:.4f}  mAP={metrics['mAP']:.4f}  "
                   f"AP_small={metrics['AP_small']:.4f}  "
                   f"score={metrics['score']:.4f}  ({elapsed:.0f}s)")
@@ -273,21 +273,55 @@ def main() -> None:
                     f"{metrics['cpu_latency_ms']:.1f}\t{metrics['score']:.6f}\n"
                 )
 
-        if seed_maps:
-            mean_map = statistics.mean(seed_maps)
-            std_map = statistics.stdev(seed_maps) if len(seed_maps) > 1 else 0.0
-            summary.append({"rank": rank, "commit": commit,
-                             "mean_mAP50": mean_map, "std_mAP50": std_map})
-            print(f"  → mean mAP50 = {mean_map:.4f} ± {std_map:.4f}\n")
+        if seed_results:
+            mean_mAP50  = statistics.mean(r["mAP50"]          for r in seed_results)
+            std_mAP50   = statistics.stdev(r["mAP50"]          for r in seed_results) if len(seed_results) > 1 else 0.0
+            mean_mAP    = statistics.mean(r["mAP"]             for r in seed_results)
+            std_mAP     = statistics.stdev(r["mAP"]            for r in seed_results) if len(seed_results) > 1 else 0.0
+            mean_APs    = statistics.mean(r["AP_small"]        for r in seed_results)
+            mean_lat    = statistics.mean(r["cpu_latency_ms"]  for r in seed_results)
+            mean_size   = statistics.mean(r["model_size_mb"]   for r in seed_results)
+            summary.append({
+                "rank": rank, "commit": commit,
+                "mean_mAP50": mean_mAP50, "std_mAP50": std_mAP50,
+                "mean_mAP":   mean_mAP,   "std_mAP":   std_mAP,
+                "mean_APs":   mean_APs,
+                "mean_lat":   mean_lat,   "mean_size":  mean_size,
+            })
+            print(f"  → mAP50={mean_mAP50:.4f}±{std_mAP50:.4f}  "
+                  f"mAP={mean_mAP:.4f}±{std_mAP:.4f}  "
+                  f"AP_small={mean_APs:.4f}  "
+                  f"latency={mean_lat:.1f}ms  size={mean_size:.2f}MB\n")
 
-    # Final ranked summary
-    print("\n" + "=" * 60)
-    print("Phase 1.5 reranking summary (sorted by mean mAP50)")
-    print("=" * 60)
-    summary.sort(key=lambda r: r["mean_mAP50"], reverse=True)
+    # Final ranked summary — sorted by mean mAP (primary), mAP50 (secondary)
+    summary.sort(key=lambda r: (r["mean_mAP"], r["mean_mAP50"]), reverse=True)
+
+    print("\n" + "=" * 72)
+    print("Phase 1.5 reranking summary  (sorted by mean mAP @ [.50:.95])")
+    print("=" * 72)
+    print(f"  {'#':>2}  {'commit':>12}  {'mAP50':>10}  {'mAP':>10}  {'AP_small':>10}  {'lat_ms':>8}  {'MB':>6}")
+    print("  " + "-" * 68)
     for i, r in enumerate(summary, 1):
-        print(f"  {i}. commit={r['commit'][:12]}  "
-              f"mean_mAP50={r['mean_mAP50']:.4f} ± {r['std_mAP50']:.4f}")
+        print(f"  {i:>2}  {r['commit'][:12]:>12}  "
+              f"{r['mean_mAP50']:.4f}±{r['std_mAP50']:.3f}  "
+              f"{r['mean_mAP']:.4f}±{r['std_mAP']:.3f}  "
+              f"{r['mean_APs']:>10.4f}  "
+              f"{r['mean_lat']:>8.1f}  "
+              f"{r['mean_size']:>6.2f}")
+
+    # Promotion gate: warn if winner's mAP margin over runner-up is within noise
+    if len(summary) >= 2:
+        winner, runnerup = summary[0], summary[1]
+        margin = winner["mean_mAP"] - runnerup["mean_mAP"]
+        noise  = winner["std_mAP"] + runnerup["std_mAP"]
+        if margin < noise:
+            print(f"\n  ⚠ PROMOTION UNCERTAIN: winner mAP margin ({margin:.4f}) is smaller "
+                  f"than combined std ({noise:.4f}). Consider running more seeds before "
+                  f"promoting {winner['commit'][:8]}.")
+        else:
+            print(f"\n  ✓ Winner {winner['commit'][:8]} leads by {margin:.4f} mAP "
+                  f"(> combined std {noise:.4f}) — promotion looks stable.")
+
     print(f"\nFull results written to {out_path}")
 
 
