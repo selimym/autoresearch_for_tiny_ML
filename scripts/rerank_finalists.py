@@ -104,9 +104,8 @@ def _train_candidate(
 
     Returns the evaluate_model metrics dict.
     """
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    from tinydet.repro import set_seed
+    set_seed(seed)
 
     # Load architecture constants from the candidate module
     img_size = getattr(mod, "IMG_SIZE", 320)

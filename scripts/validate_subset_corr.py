@@ -95,9 +95,8 @@ def _train_candidate(
     seed: int,
     device: torch.device,
 ) -> dict[str, float]:
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    from tinydet.repro import set_seed
+    set_seed(seed)
 
     img_size = getattr(mod, "IMG_SIZE", 320)
     neck_channels = getattr(mod, "NECK_CHANNELS", [96, 96, 96])
