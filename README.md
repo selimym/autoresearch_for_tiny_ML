@@ -1,92 +1,138 @@
-# autoresearch
+# autoresearch-tinydet
 
-![teaser](progress.png)
+Autonomous person-detection compression research for ARM CPU deployment.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+Forked from [karpathy/autoresearch](https://github.com/karpathy/autoresearch). Same paradigm — give an agent a pipeline and let it explore the accuracy-efficiency tradeoff space overnight — applied to detection compression rather than language model pretraining.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069) and [this tweet](https://x.com/karpathy/status/2031135152349524125).
+## What it does
 
-## How it works
+Three sequential overnight phases, each building on the previous best:
 
-The repo is deliberately kept small and only really has three files that matter:
+| Phase | Method | Tool | Time budget |
+|---|---|---|---|
+| Phase 1: Architecture Search | Evolutionary NAS (Pareto archive) | ShinkaEvolve | Night 1 (~80 experiments) |
+| Phase 2: Quantization | PTQ/QAT exploration | autoresearch loop | Night 2 (~100 experiments) |
+| Phase 3: Pruning | Structured/unstructured + recovery | autoresearch loop | Night 3 (~35 experiments) |
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+**Model:** MobileNetV4-Conv-S backbone (timm, frozen) + FPN neck with UIB blocks + FCOS head → INT8 ONNX for ARM CPU deployment.
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
+**Phase 1 uses [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve)** — SakanaAI's evolutionary program search framework — instead of the standard autoresearch loop. ShinkaEvolve runs LLM-driven mutation on `initial_compress.py` (the seed program) and maintains a Pareto archive of accuracy vs. size trade-offs across generations. This is better suited to architecture search than the linear autoresearch loop because it explores the search space non-linearly and keeps a diverse front of candidates rather than a single best. See `docs/architecture.md` for the full integration diagram and `shinka_phase1.yaml` for the search config.
 
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+## Results
 
-## Quick start
+| Model | mAP50 | Size (MB) | Score | Pi 3B+ latency |
+|---|---|---|---|---|
+| YOLOv8n baseline | — | — | — | — |
+| Phase 1 champion | — | — | — | — |
+| Phase 2 champion | — | — | — | — |
+| Phase 3 champion | — | — | — | — |
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+*(Fills as experiments run)*
+
+## Quick Start
 
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 2. Install dependencies
+# 1. Install
 uv sync
 
-# 3. Download data and train tokenizer (one-time, ~2 min)
+# 2. API key (Gemini is the default LLM — free key at aistudio.google.com)
+cp .env.example .env   # edit .env and fill in GEMINI_API_KEY
+
+# 3. Hardware config — detects your RAM/VRAM and sets safe batch_size,
+#    num_workers, pin_memory in .env automatically.
+#    WSL2 users: first give WSL more RAM (see WSL2 Memory below).
+uv run python hw_config.py           # print recommendations
+uv run python hw_config.py --export  # write them into .env
+
+# 4. One-time data setup (~20 min, downloads COCO 2017 val + annotations)
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+# 5. Smoke test architecture (no COCO required)
+uv run python initial_compress.py
+
+# 6. Smoke test full evaluation loop
+uv run python shinka_evaluate.py --program_path initial_compress.py --results_dir /tmp/smoke
+
+# 7. Subset sanity check — trains the baseline on 5K/10K/20K subsets and
+#    recommends which training set size to use for Phase 1 experiments.
+#    Runs 3 sequential training+eval rounds; takes ~30-60 min on CPU.
+uv run scripts/subset_sanity_check.py
+# Or run one size at a time to reduce peak RAM:
+uv run scripts/subset_sanity_check.py --sizes 5000
+
+# 8. Phase 1: overnight architecture search
+uv run python run_phase1.py --config shinka_phase1.yaml
+
+# Morning: review and select
+python handoff.py --phase 1
+
+# Phase 2: overnight
+# Agent runs: git commit → uv run python compress.py → grep run.log → log TSV
+
+# Morning: select best
+python handoff.py --phase 2
+
+# Phase 3: overnight
+# ...
+
+# Pi benchmark (run on Pi):
+python scripts/benchmark_pi.py --model checkpoints/phase3_champion.onnx
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+## WSL2 Memory
 
-## Running the agent
+By default WSL2 caps itself at ~50% of system RAM. If `hw_config.py` reports
+less RAM than your machine has, create `C:\Users\<you>\.wslconfig` on Windows:
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
-
-The `program.md` file is essentially a super lightweight "skill".
-
-## Project structure
-
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+```ini
+[wsl2]
+memory=12GB    # adjust to ~75% of your physical RAM
+swap=4GB
 ```
 
-## Design choices
+Then restart WSL: `wsl --shutdown` (from a Windows terminal), reopen WSL, and
+re-run `hw_config.py --export` to update `.env` with the new limits.
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+## Config reference
 
-## Platform support
+`hw_config.py --export` writes these into `.env`; you can also set them manually:
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+| Variable | Default | Effect |
+|---|---|---|
+| `TRAINING_BATCH_SIZE` | `8` | Batch size for training loops in `compress.py` and `subset_sanity_check.py` |
+| `DATALOADER_WORKERS` | `0` | DataLoader worker processes (each copies COCO JSON into RAM — 0 is safe on low-RAM machines) |
+| `DATALOADER_PIN_MEMORY` | `0` | Page-locked memory transfers (only useful with real CUDA DMA, not WSL2) |
+| `DATALOADER_PERSISTENT_WORKERS` | `0` | Keep workers alive between epochs (only when `WORKERS > 0`) |
+| `TRAINING_DEVICE` | `cpu` | `cuda` or `cpu` |
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+> `initial_compress.py` is mutated by ShinkaEvolve agents and has its own
+> hardcoded `BATCH_SIZE = 8`. Agents may change this value as part of the search.
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+## Project layout
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
+```
+tinydet/              # shared library (backbone, data, ONNX I/O, hw detection)
+blocks/               # UIB blocks copied from MobileNetV4 (reviewable in-repo)
+scripts/              # one-off tools: subset_sanity_check.py, benchmark_pi.py
+docs/                 # architecture and phase guides
 
-## Notable forks
+# Pipeline entry points (root — required by ShinkaEvolve path resolution)
+initial_compress.py   # Phase 1 seed: EVOLVE-BLOCK mutated by ShinkaEvolve
+shinka_evaluate.py    # ShinkaEvolve evaluator adapter
+compress.py           # Phase 2-3: agent edits quantization + pruning blocks
+evaluate_core.py      # fixed shared evaluation (mAP50, latency, MLflow)
+evaluate.py           # CLI evaluator / OpenEvolve-compatible interface
+run_phase1.py         # Phase 1 launcher
+prepare.py            # one-time COCO data download + subset index builder
+handoff.py            # phase transition: Pareto selection, checkpoint copy
+hw_config.py          # hardware config advisor CLI
+train_utils.py        # re-export shim for tinydet.* (backwards compat)
+program_phase2.md     # Phase 2 agent instructions
+program_phase3.md     # Phase 3 agent instructions
+```
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
+See `docs/architecture.md` for the full system diagram.
 
-## License
+## Score
 
-MIT
+`score = mAP50 / model_size_mb` where `mAP50 >= 0.15` (below floor → score = 0). Higher is better. This rewards models that are both accurate and compact.

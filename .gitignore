@@ -1,3 +1,6 @@
+# Secrets
+.env
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -21,3 +24,15 @@ dev/
 
 # Results file
 results.tsv
+
+# Detection artefacts
+checkpoints/
+.mlruns/
+handoff.json
+results_phase1.tsv
+results_phase2.tsv
+results_phase3.tsv
+eval_result.json
+run.log
+*.onnx
+*.pt
